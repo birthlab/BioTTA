@@ -20,6 +20,8 @@ We constructed normative growth trajectories for all 11 fetal brain biometrics a
 
 To facilitate clinical translation, we further developed an automated web-based reporting system built upon the BioTTA framework. This end-to-end tool allows clinicians to upload 3D fetal MRI volumes in NIfTI format and gestational age, automatically executing the full pipeline from preprocessing to biometry. The system generates an interactive HTML dashboard featuring a 3D viewer for slice navigation and quantitative analysis, where predicted measurements are dynamically mapped to standard growth trajectories to assist in risk stratification for developmental anomalies. Reports can be exported as standardized PDFs for clinical archiving, streamlining the diagnostic workflow and providing objective, consistent quantitative evidence for multi-center research.
 
+<img width="400" height="225" alt="video" src="https://github.com/user-attachments/assets/dc338598-546a-44fd-9c31-f851d4b0b350" />
+
 [Full-length video demonstrating normal case evaluation and diagnosis of abnormal cases](src/demo_video.mp4)
 
 
