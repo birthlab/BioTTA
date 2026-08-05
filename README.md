@@ -21,7 +21,8 @@ The framework operates in two stages:
 **Test-Time Adaptation**: The model adapts to individual unlabeled test samples by minimizing entropy, length consistency, and boundary-gradient losses, while incorporating atlas-informed anatomical priors via registration .
 
 
-![fig](https://github.com/user-attachments/assets/7d5c2cf3-68ab-440d-afca-4dae668335c6)
+
+<img width="10000" height="9950" alt="github_fig1_press" src="https://github.com/user-attachments/assets/43841a9c-be0e-4211-9f4f-9d2ccfe0aefd" />
 
 
 
