@@ -1,93 +1,120 @@
-"""
-BioTTA主入口脚本
-整合Step1（长度预测）和Step2（端点定位）和Step3（可视化）的完整流程
-"""
+"""Command-line entry point for the complete BioTTA inference pipeline."""
+
+import argparse
+import json
 import os
 import sys
-import argparse
-import yaml
-import json
-import pandas as pd
-import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
 import torch
+import yaml
 from natsort import natsorted
 
-# 导入模块
+from biotta_output import save_results
 from biotta_step1 import predict_lengths
 from biotta_step2 import run_tta_and_predict
-from biotta_output import save_results, format_landmarks_for_display
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_CONFIG = PROJECT_ROOT / "config.yaml"
+
+
+def _resolve_config_path(value: str, base_dir: Path) -> str:
+    """Resolve a non-empty configuration path relative to the config file."""
+    if not value:
+        return value
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return str(path.resolve())
 
 
 def load_config(config_path: str) -> Dict:
-    """加载配置文件"""
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
+    """Load YAML configuration and normalize every configured filesystem path."""
+    resolved_config = Path(config_path).expanduser().resolve()
+    with resolved_config.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+
+    base_dir = resolved_config.parent
+    paths = config.setdefault("paths", {})
+    for key in ("input_data", "output_dir", "step1_model", "step2_model", "development_curves"):
+        if key in paths:
+            paths[key] = _resolve_config_path(paths[key], base_dir)
+
+    template = paths.get("template", {})
+    for key in ("image_folder", "label_folder", "registered_folder"):
+        if key in template:
+            template[key] = _resolve_config_path(template[key], base_dir)
+
+    data = config.setdefault("data", {})
+    if "age_file" in data:
+        data["age_file"] = _resolve_config_path(data["age_file"], base_dir)
+
     return config
 
 
+def image_identifier(image_path: str) -> str:
+    """Return a stable image name with the NIfTI suffix removed."""
+    name = Path(image_path).name
+    if name.lower().endswith(".nii.gz"):
+        return name[:-7]
+    if name.lower().endswith(".nii"):
+        return name[:-4]
+    return Path(image_path).stem
+
+
 def get_image_paths(input_path: str) -> List[str]:
-    """
-    获取图像路径列表：输入路径（文件或文件夹），返回图像路径列表
-    """
-    input_path = Path(input_path)
-    
-    if input_path.is_file():
-        # 单个文件
-        if input_path.suffix in ['.nii', '.gz']:
-            return [str(input_path)]
-        else:
-            raise ValueError(f"不支持的文件格式: {input_path.suffix}")
-    elif input_path.is_dir():
-        # 文件夹
-        image_paths = []
-        for ext in ['*.nii.gz', '*.nii']:
-            image_paths.extend(list(input_path.glob(ext)))
-        image_paths = natsorted([str(p) for p in image_paths])
-        return image_paths
-    else:
-        raise FileNotFoundError(f"输入路径不存在: {input_path}")
+    """Return naturally sorted NIfTI paths from one file or one directory."""
+    path = Path(input_path).expanduser()
+    if path.is_file():
+        if path.name.lower().endswith((".nii", ".nii.gz")):
+            return [str(path.resolve())]
+        raise ValueError(f"Unsupported input format: {path.name}")
+
+    if path.is_dir():
+        images = list(path.glob("*.nii.gz")) + list(path.glob("*.nii"))
+        return natsorted(str(image.resolve()) for image in images)
+
+    raise FileNotFoundError(f"Input path does not exist: {path}")
 
 
-def get_age_for_image(image_path: str, age_file: Optional[str] = None, 
-                     age_format: Optional[Dict] = None) -> Optional[float]:
-    """
-    获取图像的年龄信息：输入年龄文件路径、年龄文件格式配置、图像路径，返回年龄值
-    """
-    if age_file is None or not os.path.exists(age_file):
+def _read_age_table(age_file: str, age_format: Dict) -> pd.DataFrame:
+    """Read a CSV or TSV gestational-age table with stable string identifiers."""
+    name_column = age_format.get("name_column", "name")
+    suffix = Path(age_file).suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(age_file, dtype={name_column: str})
+    if suffix == ".tsv":
+        return pd.read_csv(age_file, sep="\t", dtype={name_column: str})
+    raise ValueError("The gestational-age table must be a CSV or TSV file.")
+
+
+def get_age_for_image(
+    image_path: str,
+    age_file: Optional[str] = None,
+    age_format: Optional[Dict] = None,
+) -> Optional[float]:
+    """Look up an image's gestational age in an optional CSV or TSV table."""
+    if not age_file or not Path(age_file).is_file():
         return None
-    
-    if age_format is None:
-        age_format = {'name_column': 'name', 'age_column': 'age'}
-    
+
+    age_format = age_format or {"name_column": "name", "age_column": "age"}
     try:
-        # 尝试读取年龄文件
-        if age_file.endswith('.csv'):
-            age_df = pd.read_csv(age_file, dtype={age_format['name_column']: str})
-        elif age_file.endswith('.tsv'):
-            age_df = pd.read_csv(age_file, sep='\t', dtype={age_format['name_column']: str})
-        else:
-            return None
-        
-        # 获取图像名称
-        image_name = Path(image_path).stem
-        if image_name.endswith('.nii'):
-            image_name = image_name[:-4]
-        
-        # 匹配年龄
-        name_col = age_format['name_column']
-        age_col = age_format['age_column']
-        
-        print(name_col, age_col)
-        if name_col in age_df.columns and age_col in age_df.columns:
-            matches = age_df[age_df[name_col] == image_name]
-            if len(matches) > 0:
-                age = matches.iloc[0][age_col]
-                return float(age)
-    except Exception as e:
-        print(f"⚠ 读取年龄文件失败: {e}")
-    
+        age_df = _read_age_table(age_file, age_format)
+        name_column = age_format.get("name_column", "name")
+        age_column = age_format.get("age_column", "age")
+        if name_column not in age_df.columns or age_column not in age_df.columns:
+            raise KeyError(f"Required columns are missing: {name_column}, {age_column}")
+
+        matches = age_df[age_df[name_column] == image_identifier(image_path)]
+        if not matches.empty:
+            return float(matches.iloc[0][age_column])
+    except Exception as error:
+        print(f"[WARNING] Could not read gestational age for {image_path}: {error}")
+
     return None
 
 
@@ -95,373 +122,241 @@ def process_single_image(
     image_path: str,
     config: Dict,
     device: torch.device,
-    age: Optional[float] = None
+    age: Optional[float] = None,
 ) -> Dict:
-    """
-    处理单个图像
-    
-    Args:
-        image_path: 图像路径
-        config: 配置字典
-        device: 计算设备
-        age: 年龄（可选）
-    
-    Returns:
-        结果字典
-    """
-    print(f"\n{'='*60}")
-    print(f"处理图像: {os.path.basename(image_path)}")
-    print(f"{'='*60}")
-    
-    # Step1: 预测长度
-    print("\n[Step1] 预测生物测量长度...")
-    step1_config = config['step1']
-    step1_model_path = config['paths']['step1_model']
-    biometry_list = config['data']['biometry_list']
-    length_weights = config['data']['length_weights']
-    ventricle_indices = [0, 1, 2, 3]
-    
+    """Run length prediction and landmark localization for one NIfTI image."""
+    print("\n" + "=" * 60)
+    print(f"Processing image: {Path(image_path).name}")
+    print("=" * 60)
+
+    step1_config = config["step1"]
+    biometry_list = config["data"]["biometry_list"]
+
+    print("\n[Step 1] Predicting biometric measurements...")
     try:
-        pred_lengths_df = predict_lengths(
+        prediction_df = predict_lengths(
             [image_path],
-            step1_model_path,
+            config["paths"]["step1_model"],
             device,
-            batch_size=step1_config['batch_size'],
+            batch_size=step1_config["batch_size"],
             biometry_list=biometry_list,
-            length_weights=length_weights,
-            ventricle_indices=ventricle_indices
+            length_weights=config["data"]["length_weights"],
+            ventricle_indices=config["data"].get("ventricle_indices", [0, 1, 2, 3]),
+            num_workers=config["system"].get("num_workers", 2),
         )
-        
-        pred_lengths = pred_lengths_df.iloc[0]
-        print("✓ Step1 完成")
-        print(f"预测的长度值:")
-        for i, biometry in enumerate(biometry_list):
-            print(f"  {biometry}: {pred_lengths[biometry]:.2f}")
-        
-        # 保存Step1结果（如果配置允许）
-        save_intermediate = config['system'].get('save_intermediate', {})
-        if save_intermediate.get('step1_results', True):
-            output_dir = config['paths']['output_dir']
-            os.makedirs(output_dir, exist_ok=True)
-            step1_csv_path = os.path.join(output_dir, 'step1_lengths.csv')
-            # 如果文件已存在，追加模式；否则新建
-            if os.path.exists(step1_csv_path):
-                existing_df = pd.read_csv(step1_csv_path)
-                pred_lengths_df = pd.concat([existing_df, pred_lengths_df], ignore_index=True)
-            pred_lengths_df.to_csv(step1_csv_path, index=False)
-            print(f"✓ Step1结果已保存到: {step1_csv_path}")
-    except Exception as e:
-        print(f"✗ Step1 失败: {e}")
+        predicted_lengths = prediction_df.iloc[0]
+        print("[OK] Step 1 completed")
+        for biometry in biometry_list:
+            print(f"  {biometry}: {predicted_lengths[biometry]:.2f}")
+
+        save_intermediate = config["system"].get("save_intermediate", {})
+        if save_intermediate.get("step1_results", False):
+            output_dir = Path(config["paths"]["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = output_dir / "step1_lengths.csv"
+            if csv_path.exists():
+                existing_df = pd.read_csv(csv_path)
+                prediction_df = pd.concat([existing_df, prediction_df], ignore_index=True)
+            prediction_df.to_csv(csv_path, index=False)
+            print(f"[OK] Step 1 results saved to: {csv_path}")
+    except Exception as error:
+        print(f"[ERROR] Step 1 failed: {error}")
         raise
-    
-    # Step2: TTA端点定位
-    print("\n[Step2] TTA端点定位...")
-    step2_config = config['step2']
-    step2_model_path = config['paths']['step2_model']
-    
-    # 获取年龄（如果未提供）
+
     if age is None:
-        age_file = config['paths'].get('age_file', '')
-        age_format = config['data'].get('age_file_format', {})
-        age = get_age_for_image(image_path, age_file if age_file else None, age_format)
-    
-    # 模板路径
-    template_paths = None
-    if 'template' in config['paths']:
-        template_config = config['paths']['template']
-        if os.path.exists(template_config.get('image_folder', '')):
-            template_paths = {
-                'image_folder': template_config['image_folder'],
-                'label_folder': template_config['label_folder'],
-                'registered_folder': template_config.get('registered_folder', '')
-            }
-    
-    # 是否使用已有TTA模型
-    use_existing_tta = step2_config.get('use_existing_tta', False)
-    skip_tta = step2_config.get('skip_tta', False)
-    
-    tta_model_path = None
-    if use_existing_tta:
-        # 尝试找到对应的TTA模型
-        image_name = Path(image_path).stem
-        if image_name.endswith('.nii'):
-            image_name = image_name[:-4]
-        
-        output_dir = config['paths']['output_dir']
-        tta_model_path = os.path.join(output_dir, image_name, 'tent_TTA.pth')
-        if not os.path.exists(tta_model_path):
-            tta_model_path = None
-    
-    # 准备输出目录和中间结果保存配置
-    output_dir = config['paths']['output_dir']
-    curve_dir = config['paths']['development_curves']
-    image_name = Path(image_path).stem.replace('.nii', '')
-    per_image_output_dir = os.path.join(output_dir, image_name)
-    os.makedirs(per_image_output_dir, exist_ok=True)
-    save_intermediate = config['system'].get('save_intermediate', {})
-    
-    try:
-        landmarks, metadata = run_tta_and_predict(
+        data_config = config["data"]
+        age = get_age_for_image(
             image_path,
-            pred_lengths[biometry_list],
-            step2_model_path,
+            data_config.get("age_file") or None,
+            data_config.get("age_file_format", {}),
+        )
+
+    template_paths = None
+    template_config = config["paths"].get("template", {})
+    image_folder = template_config.get("image_folder", "")
+    label_folder = template_config.get("label_folder", "")
+    if Path(image_folder).is_dir() and Path(label_folder).is_dir():
+        template_paths = {
+            "image_folder": image_folder,
+            "label_folder": label_folder,
+            "registered_folder": template_config.get("registered_folder", ""),
+        }
+
+    image_name = image_identifier(image_path)
+    output_dir = Path(config["paths"]["output_dir"])
+    image_output_dir = output_dir / image_name
+    image_output_dir.mkdir(parents=True, exist_ok=True)
+
+    step2_config = config["step2"]
+    use_existing_tta = step2_config.get("use_existing_tta", False)
+    tta_model_path = image_output_dir / "tent_TTA.pth"
+    if not use_existing_tta or not tta_model_path.exists():
+        tta_model_path = None
+
+    print("\n[Step 2] Running test-time adaptation and landmark localization...")
+    try:
+        landmarks, _ = run_tta_and_predict(
+            image_path,
+            predicted_lengths[biometry_list],
+            config["paths"]["step2_model"],
             device,
             step2_config,
             template_paths=template_paths,
             age=age,
-            skip_tta=skip_tta,
-            tta_model_path=tta_model_path if use_existing_tta else None,
-            output_dir=per_image_output_dir,
-            curve_dir=curve_dir,
-            save_intermediate=save_intermediate
+            skip_tta=step2_config.get("skip_tta", False),
+            tta_model_path=str(tta_model_path) if tta_model_path else None,
+            output_dir=str(image_output_dir),
+            curve_dir=config["paths"]["development_curves"],
+            save_intermediate=config["system"].get("save_intermediate", {}),
         )
-        
-        print("✓ Step2 完成")
-        print(f"预测的端点数量: {len(landmarks)}")
-        print("\n前3个端点坐标:")
-        for i in range(min(3, len(landmarks))):
-            print(f"  Point {i+1}: ({landmarks[i][0]:.2f}, {landmarks[i][1]:.2f}, {landmarks[i][2]:.2f})")
-    except Exception as e:
-        print(f"✗ Step2 失败: {e}")
+        print(f"[OK] Step 2 completed with {len(landmarks)} landmarks")
+        for index, point in enumerate(landmarks[:3], start=1):
+            print(f"  Point {index}: ({point[0]:.2f}, {point[1]:.2f}, {point[2]:.2f})")
+    except Exception as error:
+        print(f"[ERROR] Step 2 failed: {error}")
         raise
-    
-    # 构建结果
-    result = {
-        'image_name': Path(image_path).stem.replace('.nii', ''),
-        'age': age,
-        'lengths': pred_lengths[biometry_list].to_dict(),
-        'landmarks': landmarks
+
+    return {
+        "image_name": image_name,
+        "age": age,
+        "lengths": predicted_lengths[biometry_list].to_dict(),
+        "landmarks": landmarks,
     }
-    
-    return result
 
 
-def process_batch(
-    image_paths: List[str],
-    config: Dict,
-    device: torch.device
-) -> List[Dict]:
-    """
-    批量处理图像
-    
-    Args:
-        image_paths: 图像路径列表
-        config: 配置字典
-        device: 计算设备
-    
-    Returns:
-        结果列表
-    """
-    print(f"\n开始批量处理 {len(image_paths)} 个图像...\n")
-    
+def process_batch(image_paths: List[str], config: Dict, device: torch.device) -> List[Dict]:
+    """Process multiple images while allowing an individual sample to fail."""
+    print(f"\nStarting batch processing for {len(image_paths)} images...")
     results = []
-    
-    # 加载年龄文件（如果有）
-    age_file = config['paths'].get('age_file', '')
-    age_format = config['data'].get('age_file_format', {})
-    age_df = None
-    
-    if age_file and os.path.exists(age_file):
+    data_config = config["data"]
+    age_file = data_config.get("age_file") or None
+    age_format = data_config.get("age_file_format", {})
+
+    for index, image_path in enumerate(image_paths, start=1):
+        print(f"\n[{index}/{len(image_paths)}]")
+        age = get_age_for_image(image_path, age_file, age_format)
         try:
-            if age_file.endswith('.csv'):
-                age_df = pd.read_csv(age_file, dtype={age_format.get('name_column', 'name'): str})
-            elif age_file.endswith('.tsv'):
-                age_df = pd.read_csv(age_file, sep='\t', dtype={age_format.get('name_column', 'name'): str})
-        except Exception as e:
-            print(f"⚠ 无法加载年龄文件: {e}")
-    
-    # 处理每个图像
-    for idx, image_path in enumerate(image_paths):
-        print(f"\n[{idx+1}/{len(image_paths)}]")
-        
-        # 尝试从年龄文件中获取年龄
-        age = None
-        if age_df is not None:
-            image_name = Path(image_path).stem.replace('.nii', '')
-            name_col = age_format.get('name_column', 'name')
-            age_col = age_format.get('age_column', 'age')
-            
-            if name_col in age_df.columns and age_col in age_df.columns:
-                matches = age_df[age_df[name_col] == image_name]
-                if len(matches) > 0:
-                    age = float(matches.iloc[0][age_col])
-        
-        try:
-            result = process_single_image(image_path, config, device, age)
-            results.append(result)
-        except Exception as e:
-            print(f"✗ 处理失败: {e}")
-            # 可以选择继续或停止
-            continue
-    
+            results.append(process_single_image(image_path, config, device, age))
+        except Exception as error:
+            print(f"[ERROR] Processing failed for {image_path}: {error}")
+
     return results
 
 
-def main():
-    """主函数"""
+def build_parser() -> argparse.ArgumentParser:
+    """Create the BioTTA command-line parser."""
     parser = argparse.ArgumentParser(
-        description='BioTTA: 胎儿生物测量和端点定位工具',
+        description="BioTTA fetal brain biometry and landmark localization",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-        示例用法:
-            # 单个文件（指定年龄）
-            python main.py --input path/to/image.nii.gz --age 31 --output ./results
-    
-            # 文件夹（从CSV读取年龄）
-            python main.py --input path/to/folder --age_csv path/to/age.csv --output ./results
-        """
+        epilog="""Examples:
+  python main.py --input path/to/image.nii.gz --age 31 --output ./results
+  python main.py --input path/to/folder --age_csv path/to/ages.csv --output ./results
+  python main.py --config path/to/config.yaml
+""",
     )
-    
-    # 输入从命令行或者配置文件中获取，在这部分进行第一步处理
+    parser.add_argument("--input", "-i", help="NIfTI file or directory")
+    parser.add_argument(
+        "--config",
+        "-c",
+        default=str(DEFAULT_CONFIG),
+        help=f"Configuration file (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument("--gpu", help="Visible GPU index")
+    parser.add_argument("--age", type=float, help="Gestational age for one input file")
+    parser.add_argument("--age_csv", help="CSV or TSV gestational-age table for batch input")
+    parser.add_argument(
+        "--age_file_format",
+        help='JSON column mapping, for example: {"name_column":"name","age_column":"age"}',
+    )
+    parser.add_argument(
+        "--registered_folder",
+        help="Directory used to cache registered atlas labels",
+    )
+    parser.add_argument("--output", "-o", help="Output directory")
+    return parser
 
-    parser.add_argument(
-        '--input', '-i',
-        type=str,
-        required=True,
-        help='输入图像文件或文件夹路径'
-    )
-    
-    parser.add_argument(
-        '--config', '-c',
-        type=str,
-        default='config.yaml',
-        help='配置文件路径 (默认: config.yaml)'
-    )
-    
-    parser.add_argument(
-        '--gpu',
-        type=str,
-        default=None,
-        help='GPU ID (默认: 使用配置文件中的设置)'
-    )
-    
-    parser.add_argument(
-        '--age',
-        type=int,
-        default=None,
-        help='年龄值（整数，用于单个文件输入时直接指定）'
-    )
 
-    parser.add_argument(
-        '--age_csv',
-        type=str,
-        default=None,
-        help='年龄CSV文件路径（用于文件夹批量处理，覆盖config中的设置）。CSV需包含name和age两列'
-    )
-    
-    parser.add_argument(
-        '--age_file_format',
-        type=str,
-        default=None,
-        help='覆盖 age_file_format 配置，传入 JSON 字符串，例如: \'{"name_column": "name", "age_column": "age"}\''
-    )
-    
-    parser.add_argument(
-        '--registered_folder',
-        type=str,
-        default=None,
-        help='覆盖 registered_folder 配置，传入 JSON 字符串，例如: \'{"name_column": "name", "age_column": "age"}\''
-    )
-
-    parser.add_argument(
-        '--output', '-o',
-        type=str,
-        default=None,
-        help='输出目录路径 (默认: 使用配置文件中的设置)'
-    )
-    
-    args = parser.parse_args()
-    
-    # 加载配置
-    if not os.path.exists(args.config):
-        print(f"✗ 配置文件不存在: {args.config}")
+def main() -> None:
+    """Parse arguments, run BioTTA, and save structured results."""
+    args = build_parser().parse_args()
+    config_path = Path(args.config).expanduser()
+    if not config_path.is_file():
+        print(f"[ERROR] Configuration file does not exist: {config_path}")
         sys.exit(1)
-    
-    config = load_config(args.config)
 
-    # 如果预测文件夹并提供了胎龄csv
-    if args.age_csv is not None:
-        if not os.path.exists(args.age_csv):
-            print(f"✗ 年龄CSV文件不存在: {args.age_csv}")
+    config = load_config(str(config_path))
+
+    if args.age_csv:
+        age_csv = Path(args.age_csv).expanduser().resolve()
+        if not age_csv.is_file():
+            print(f"[ERROR] Gestational-age file does not exist: {age_csv}")
             sys.exit(1)
-        config['paths']['age_file'] = args.age_csv
-        print(f"使用命令行指定的年龄文件: {args.age_csv}")
-    
-    # 如果提供了胎龄csv的列名age_file_format
-    if args.age_file_format is not None:
+        config["data"]["age_file"] = str(age_csv)
+
+    if args.age_file_format:
         try:
-            age_format_dict = json.loads(args.age_file_format)
-        except json.JSONDecodeError as e:
-            print(f"✗ 解析 --age_file_format 失败: {e}")
+            config["data"]["age_file_format"].update(json.loads(args.age_file_format))
+        except (json.JSONDecodeError, TypeError) as error:
+            print(f"[ERROR] Invalid --age_file_format JSON: {error}")
             sys.exit(1)
-        config['data']['age_file_format'].update(age_format_dict)
-    
-    # 如果提供了反配准后图谱的保存路径    
-    if args.registered_folder is not None:
-        config['paths']['template']['registered_folder'] = args.registered_folder
-    
-    # 设置GPU
-    gpu_id = args.gpu or config['system']['gpu_id']
-    if gpu_id:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
-    
-    # 设置输出目录
+
+    if args.registered_folder:
+        config["paths"]["template"]["registered_folder"] = str(
+            Path(args.registered_folder).expanduser().resolve()
+        )
+
     if args.output:
-        config['paths']['output_dir'] = args.output
-    
-    # 获取输入路径
-    input_path = args.input
+        config["paths"]["output_dir"] = str(Path(args.output).expanduser().resolve())
+
+    gpu_id = args.gpu if args.gpu is not None else config["system"].get("gpu_id")
+    if gpu_id is not None and str(gpu_id) != "":
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    seed = int(config["system"].get("seed", 1))
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    input_path = args.input or config["paths"].get("input_data", "")
     if not input_path:
-        input_path = config['paths'].get('input_data', '')
-    
-    if not input_path:
-        print("✗ 未指定输入路径，请使用 --input 参数或配置文件中设置")
+        print("[ERROR] No input path was provided by --input or paths.input_data.")
         sys.exit(1)
-    
+
     try:
         image_paths = get_image_paths(input_path)
-        print(f"找到 {len(image_paths)} 个图像文件")
-    except Exception as e:
-        print(f"✗ 获取图像路径失败: {e}")
+    except Exception as error:
+        print(f"[ERROR] Could not collect input images: {error}")
         sys.exit(1)
-    
-    if len(image_paths) == 0:
-        print("✗ 未找到图像文件")
+
+    if not image_paths:
+        print("[ERROR] No NIfTI images were found.")
         sys.exit(1)
-    
-    # 处理图像
+    print(f"Found {len(image_paths)} image file(s)")
+
     if len(image_paths) == 1:
-        # 单文件处理，如果提供了--age参数则使用
-        age = args.age
-        result = process_single_image(image_paths[0], config, device, age=age)
-        results = [result]
+        results = [process_single_image(image_paths[0], config, device, age=args.age)]
     else:
-        # 批量处理
         if args.age is not None:
-            print("⚠ 批量处理时忽略--age参数（仅对单个文件有效）")
+            print("[WARNING] --age is ignored for batch input; use --age_csv instead.")
         results = process_batch(image_paths, config, device)
-    
-    # 保存结果
-    if len(results) > 0:
-        print(f"\n{'='*60}")
-        print("保存结果...")
-        print(f"{'='*60}")
-        
-        output_dir = config['paths']['output_dir']
-        output_format = config['output'].get('format', 'json')
-        biometry_list = config['data']['biometry_list']
-        
-        save_results(results, output_dir, output_format, biometry_list)
-        
-        print(f"\n✓ 处理完成! 共处理 {len(results)} 个图像")
-        print(f"结果已保存到: {output_dir}")
-    else:
-        print("\n✗ 没有成功处理任何图像")
+
+    if not results:
+        print("[ERROR] No images were processed successfully.")
+        sys.exit(1)
+
+    save_results(
+        results,
+        config["paths"]["output_dir"],
+        config["output"].get("format", "json"),
+        config["data"]["biometry_list"],
+    )
+    print(f"[OK] Processed {len(results)} image(s)")
+    print(f"Results saved to: {config['paths']['output_dir']}")
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,114 +1,107 @@
-# BioTTA Docker 使用指南
+# BioTTA Docker Guide
 
-## 概述
+The Docker image uses PyTorch 2.6.0 with CUDA 12.4 and runs as a non-root user. The scientific dependency versions match the `lyj_clone` environment validated on the A40 server; the application code is also validated with PyTorch 2.5.1 in that environment.
 
-本指南介绍如何使用Docker容器运行BioTTA，确保环境一致性和易于复现。
+## Prerequisites
 
-## 前置要求
+- Docker 20.10 or later
+- NVIDIA Container Toolkit for GPU access
+- A compatible NVIDIA driver
+- Sufficient GPU memory for 3D inference and test-time adaptation
 
-- Docker (版本 20.10+)
-- NVIDIA Docker (如果使用GPU，需要安装 nvidia-docker2)
-- 至少 20GB 可用磁盘空间
+## Build
 
-## 快速开始
-
-### 1. 构建Docker镜像
+Pass the current user's UID and GID at build time. This is required when the output directory is on NFS or another bind-mounted filesystem.
 
 ```bash
-cd /data/birth/lmx/work/Class_projects/lyj/work/fetal_localization_SFUDA/BioTTA
-docker build -t biotta:latest .
+docker build \
+  --build-arg APP_UID=$(id -u) \
+  --build-arg APP_GID=$(id -g) \
+  -t biotta:latest .
 ```
 
-### 2. 准备数据和模型
-
-在运行容器前，确保你有以下文件：
-- **模型文件**: `models/step1_length_MinValLoss.pth` 和 `models/step2_biometry_MinValLoss.pth`
-- **模板文件**: `templates/template_image/` 和 `templates/template_label/`
-- **输入数据**: 你的 `.nii.gz` 文件
-
-### 3. 运行容器
-
-#### GPU模式
+Verify the image and its non-root identity:
 
 ```bash
-docker run --rm --gpus all \
-  -v /path/to/your/data:/data/input \
-  -v /path/to/output:/data/output \
-  -v /path/to/models:/app/models \
-  -v /path/to/templates:/app/templates \
-  biotta:latest \
-  python main.py --input /data/input/image.nii.gz --output /data/output --gpu 0
+docker run --rm biotta:latest python main.py --help
+docker run --rm biotta:latest id
 ```
 
-#### 使用自定义配置文件
+## Run One File
 
 ```bash
-docker run --rm --gpus all \
-  -v /path/to/your/data:/data/input \
-  -v /path/to/output:/data/output \
-  -v /path/to/models:/app/models \
-  -v /path/to/templates:/app/templates \
-  -v /path/to/config.yaml:/app/config.yaml \
-  biotta:latest \
-  python main.py --input /data/input/image.nii.gz --config /app/config.yaml --output /data/output
-```
+mkdir -p ./results ./templates_registered
 
-#### 指定年龄值
-
-```bash
-docker run --rm --gpus all \
-  -v /path/to/your/data:/data/input \
-  -v /path/to/output:/data/output \
-  -v /path/to/models:/app/models \
-  -v /path/to/templates:/app/templates \
-  biotta:latest \
-  python main.py --input /data/input/image.nii.gz --age 24 --output /data/output
-```
-
-## 数据卷说明
-
-建议将以下目录通过数据卷挂载：
-
-| 宿主机路径 | 容器内路径 | 说明 |
-|-----------|-----------|------|
-| `/path/to/models` | `/app/models` | 模型文件目录 |
-| `/path/to/templates` | `/app/templates` | 模板文件目录 |
-| `/path/to/input` | `/data/input` | 输入数据目录 |
-| `/path/to/output` | `/data/output` | 输出结果目录 |
-
-## 完整示例
-
-```bash
-# 1. 构建镜像
-docker build -t biotta:latest .
-
-# 2. 运行处理单个文件
-docker run --rm --gpus all \
-  -v $(pwd)/models:/app/models:ro \
-  -v $(pwd)/templates:/app/templates:ro \
-  -v /data/input:/data/input:ro \
-  -v $(pwd)/results:/data/output \
+docker run --rm --gpus '"device=0"' \
+  -v "$(pwd)/path/to/input:/data/input:ro" \
+  -v "$(pwd)/results:/data/output" \
+  -v "$(pwd)/templates_registered:/data/registered" \
   biotta:latest \
   python main.py \
     --input /data/input/sample.nii.gz \
-    --age 24 \
-    --output /data/output \
-    --gpu 0
-
-# 3. 批量处理文件夹
-docker run --rm --gpus all \
-  -v $(pwd)/models:/app/models:ro \
-  -v $(pwd)/templates:/app/templates:ro \
-  -v /data/input_folder:/data/input:ro \
-  -v $(pwd)/results:/data/output \
-  biotta:latest \
-  python main.py \
-    --input /data/input \
+    --age 31 \
+    --registered_folder /data/registered \
     --output /data/output \
     --gpu 0
 ```
 
+The image already contains the bundled models, atlas templates, and development curves. To substitute any of them, mount a read-only directory over the corresponding path:
 
+```bash
+-v /path/to/models:/app/models:ro
+-v /path/to/templates:/app/templates:ro
+-v /path/to/development_curves:/app/development_curves:ro
+```
 
+## Batch Processing
 
+```bash
+mkdir -p ./results ./templates_registered
 
+docker run --rm --gpus '"device=0"' \
+  -v "$(pwd)/path/to/input:/data/input:ro" \
+  -v "$(pwd)/path/to/ages.csv:/data/ages.csv:ro" \
+  -v "$(pwd)/results:/data/output" \
+  -v "$(pwd)/templates_registered:/data/registered" \
+  biotta:latest \
+  python main.py \
+    --input /data/input \
+    --age_csv /data/ages.csv \
+    --registered_folder /data/registered \
+    --output /data/output \
+    --gpu 0
+```
+
+## Permission Checks
+
+The files below should have the same numeric owner as the host user:
+
+```bash
+id -u
+id -g
+ls -ln ./results
+```
+
+If the image was built for a different host user, rebuild it with the correct `APP_UID` and `APP_GID`. Do not work around NFS permission errors by running the container as root.
+
+## Troubleshooting
+
+Check GPU access:
+
+```bash
+docker run --rm --gpus all biotta:latest \
+  python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"
+```
+
+Check ANTsPyX:
+
+```bash
+docker run --rm biotta:latest \
+  python -c "import ants; print(ants.__version__)"
+```
+
+Check the installed package versions:
+
+```bash
+docker run --rm biotta:latest python -m pip list
+```

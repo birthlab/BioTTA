@@ -8,8 +8,11 @@ __pycache__/
 build/
 dist/
 
-.git/
-.gitignore
+.venv/
+venv/
+.env
+.env.*
+
 .vscode/
 .idea/
 *.swp
@@ -21,10 +24,5 @@ test_results/
 templates_registered/
 *.log
 
-README.md
-DOCKER.md
-docs/
-
-Dockerfile
-.dockerignore
-docker-compose.yml
+.DS_Store
+Thumbs.db

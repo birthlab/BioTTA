@@ -1,13 +1,11 @@
-"""
-网络：SCN空间、CNN外观
-"""
+"""Spatial configuration and convolutional appearance networks."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Sequence
 from functools import partial
 from torch.utils.checkpoint import checkpoint
-from timm.models.layers import drop_path, trunc_normal_
+from timm.layers import drop_path, trunc_normal_
 
 
 ACT = {'relu': nn.ReLU, 'leaky': nn.LeakyReLU, 'prelu': nn.PReLU, 'tanh': nn.Tanh, 'sigmoid': nn.Sigmoid}
@@ -25,25 +23,25 @@ class SCN(nn.Module):
         local_act: str = None,
         spatial_act: str = 'relu',
     ):
-        super().__init__() # 父类nn.Module的初始化
+        super().__init__()
         self.HLA = LocalAppearance(in_channels, num_classes, filters, dropout, mode)
         self.down = nn.AvgPool3d(factor, factor, ceil_mode=True)
         self.up = nn.Upsample(scale_factor=factor, mode='trilinear', align_corners=True)
-        self.local_act = ACT[local_act]() if local_act else None # 局部激活函数
-        self.spatial_act = ACT[spatial_act]() # 局部激活函数
-        self.HSC = nn.Sequential( # 不改变特征图大小和通道数(filters)
+        self.local_act = ACT[local_act]() if local_act else None
+        self.spatial_act = ACT[spatial_act]()
+        self.HSC = nn.Sequential(
             nn.Conv3d(filters, filters, 5, 1, 2, bias=False),
             nn.Conv3d(filters, filters, 5, 1, 2, bias=False),
             nn.Conv3d(filters, filters, 5, 1, 2, bias=False),
             nn.Conv3d(filters, num_classes, 5, 1, 2 , bias=False),
         )
-        nn.init.trunc_normal_(self.HSC[-1].weight, 0, 1e-4) # 对 HSC 模块的最后一层卷积的权重进行截断正态分布初始化
+        nn.init.trunc_normal_(self.HSC[-1].weight, 0, 1e-4)
 
-    def forward(self, x: torch.Tensor) -> Sequence[torch.Tensor]: # x是输入
+    def forward(self, x: torch.Tensor) -> Sequence[torch.Tensor]:
         d1, HLA = self.HLA(x)
         if self.local_act:
             HLA = self.local_act(HLA)
-        HSC = self.up(self.spatial_act(self.HSC(self.down(d1)))) # d1->池化->4次卷积->上采样恢复尺寸
+        HSC = self.up(self.spatial_act(self.HSC(self.down(d1))))
         #print(HSC.shape)
         heatmap = HLA * HSC
         return heatmap, HLA, HSC
@@ -58,23 +56,21 @@ class LocalAppearance(nn.Module):
         dropout: float = 0.,
         mode: str = 'add',
     ):
-        super().__init__() # 父类nn.Module的初始化
+        super().__init__()
         self.mode = mode
         self.pool = nn.AvgPool3d(2, 2, ceil_mode=True)
         self.up = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=True)
-        self.in_conv = self.Block(in_channels, filters) # 通道由in_channels到filters,大小不变,卷积
-        self.out_conv = nn.Conv3d(filters, num_classes, 1, bias=False) # 通道由in_channels到filters,大小不变,不卷积
-        # 修改处：添加 Sigmoid 激活层
+        self.in_conv = self.Block(in_channels, filters)
+        self.out_conv = nn.Conv3d(filters, num_classes, 1, bias=False)
         # self.out_conv = nn.Sequential(
         #     nn.Conv3d(filters, num_classes, 1, bias=False),
-        #     nn.Sigmoid()  # 新增激活函数
         # )
-        self.enc1 = self.Block(filters, filters, dropout) # 不停卷积
+        self.enc1 = self.Block(filters, filters, dropout)
         self.enc2 = self.Block(filters, filters, dropout)
         self.enc3 = self.Block(filters, filters, dropout)
         self.enc4 = self.Block(filters, filters, dropout)
         if mode == 'add':
-            self.dec3 = self.Block(filters, filters, dropout) # 现在的图与原来的enc求和再卷积
+            self.dec3 = self.Block(filters, filters, dropout)
             self.dec2 = self.Block(filters, filters, dropout)
             self.dec1 = self.Block(filters, filters, dropout)
         else:
@@ -82,10 +78,8 @@ class LocalAppearance(nn.Module):
             self.dec2 = self.Block(2*filters, filters, dropout)
             self.dec1 = self.Block(2*filters, filters, dropout)
         nn.init.trunc_normal_(self.out_conv.weight, 0, 1e-4)
-        # 修改处：调整初始化对象（针对 Sequential 中的 Conv3d）
-        # nn.init.trunc_normal_(self.out_conv[0].weight, 0, 1e-4)  # 初始化第一个子模块（Conv3d）
 
-    def Block(self, in_channels, out_channels, dropout=0): # 不改变特征图大小,主要是用卷积核糊化,CNN
+    def Block(self, in_channels, out_channels, dropout=0):
         return nn.Sequential(
             nn.Conv3d(in_channels, out_channels, 3, 1, 1, bias=False),
             nn.Dropout3d(dropout, True),
@@ -101,7 +95,7 @@ class LocalAppearance(nn.Module):
         x0 = self.in_conv(x)
         e1 = self.enc1(x0)
         #print(e1.shape)
-        e2 = self.enc2(self.pool(e1)) # self.pool,特征图大小减半
+        e2 = self.enc2(self.pool(e1))
         #print(e2.shape)
         e3 = self.enc3(self.pool(e2))
         #print(e3.shape)
@@ -114,44 +108,36 @@ class LocalAppearance(nn.Module):
             #print(d2.shape)
             d1 = self.dec1(self.up(d2)+e1)
             #print('d1:',d1.shape)
-        else: # 理解为 mode == 'cat'
+        else:
             d3 = self.dec3(torch.cat([self.up(e4), e3], dim=1))
             d2 = self.dec2(torch.cat([self.up(d3), e2], dim=1))
             d1 = self.dec1(torch.cat([self.up(d2), e1], dim=1))
 
-        # out和d1的区别:out_conv卷积核为1,只是通道数由filters变为num_classes
         out = self.out_conv(d1)
         return d1, out # torch.sigmoid(out)
 
 class PointPredictor(nn.Module):
     def __init__(self, channel: int):
         super().__init__()
-        # 共享的特征提取网络（输入为单通道）
         self.shared_conv = nn.Sequential(
-            nn.Conv3d(1, 64, kernel_size=3, padding=1),  # 保持空间维度
+            nn.Conv3d(1, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv3d(64, 64, kernel_size=3, padding=1),
             nn.ReLU()
         )
-        # 共享的回归头
         self.shared_regressor = nn.Sequential(
-            nn.AdaptiveAvgPool3d(1),  # 全局空间平均池化
+            nn.AdaptiveAvgPool3d(1),
             nn.Flatten(),
             nn.Linear(64, 128),
             nn.ReLU(),
-            nn.Linear(128, 6)  # 每个通道输出6个坐标
+            nn.Linear(128, 6)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor: # x是heatmap
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, D, H, W = x.shape
-        # 将通道维度合并到批次维度
-        # 新形状: (B*C, 1, D, H, W)
         x = x.view(B*C, 1, D, H, W)
-        # 共享卷积特征提取
         features = self.shared_conv(x)  # (B*C, 64, D, H, W)
-        # 共享回归头
         coords = self.shared_regressor(features)  # (B*C, 6)
-        # 恢复原始维度
         coords = coords.view(B, C, 6)  # (B, C=11, 6)
         return coords
 
@@ -276,7 +262,6 @@ class Attention(nn.Module):
         self.proj = nn.Linear(all_head_dim, dim, bias=True)
         self.proj_drop = nn.Dropout(proj_drop)
         
-        # 初始化权重以防止数值不稳定
         nn.init.xavier_uniform_(self.qkv.weight)
         if self.qkv.bias is not None:
             nn.init.zeros_(self.qkv.bias)
@@ -287,7 +272,6 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         
-        # 检查输入是否包含NaN或无穷大
         if torch.isnan(x).any() or torch.isinf(x).any():
             print(f"Warning: Input contains NaN or Inf values in Attention")
             print(f"x shape: {x.shape}, x min: {x.min()}, x max: {x.max()}")
@@ -296,7 +280,6 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
         
-        # 检查q, k, v是否包含NaN或无穷大
         if torch.isnan(q).any() or torch.isinf(q).any():
             print(f"Warning: q contains NaN or Inf values")
             q = torch.nan_to_num(q, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -307,10 +290,8 @@ class Attention(nn.Module):
             print(f"Warning: v contains NaN or Inf values")
             v = torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=-1.0)
         
-        # 计算注意力权重
         attn_weights = q @ k.transpose(-2, -1)
         
-        # 检查注意力权重是否包含NaN或无穷大
         if torch.isnan(attn_weights).any() or torch.isinf(attn_weights).any():
             print(f"Warning: Attention weights contain NaN or Inf values")
             print(f"attn_weights shape: {attn_weights.shape}")
@@ -414,14 +395,11 @@ class ViTPose3D(nn.Module):
         self.out_activation = out_activation
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 
-        # Patch Embedding + Positional Embedding（无 cls token）
         self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size,
                                       in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
 
-        # 轻量级低层特征（skip）：将输入下采样 8×，对齐到 (Hp,Wp,Dp)
-        # 3 次 stride=2 的 3x3x3 卷积： 1 -> 16 -> 32 -> embed_dim
         self.low_level = nn.Sequential(
             nn.Conv3d(in_chans, 16, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm3d(16), nn.ReLU(inplace=True),
@@ -440,9 +418,8 @@ class ViTPose3D(nn.Module):
         ])
         self.last_norm = norm_layer(embed_dim)
 
-        # 解码器：3 次上采样回到原分辨率
         self.up1 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.fuse1 = DoubleConv(embed_dim * 2, embed_dim)   # 与低层特征融合
+        self.fuse1 = DoubleConv(embed_dim * 2, embed_dim)
         self.up2 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
         self.conv2 = DoubleConv(embed_dim, embed_dim)
         self.up3 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
@@ -465,7 +442,7 @@ class ViTPose3D(nn.Module):
     def forward_features(self, x):
         B, C, H, W, D = x.shape
         tokens, (Hp, Wp, Dp) = self.patch_embed(x)     # [B, N, E], N=Hp*Wp*Dp
-        tokens = tokens + self.pos_embed               # 正确：仅加一次 positional embedding
+        tokens = tokens + self.pos_embed
 
         for blk in self.blocks:
             tokens = blk(tokens)
@@ -493,7 +470,6 @@ class ViTPose3D(nn.Module):
         y = self.conv3(y)
         y = self.up3(y)                                       # /1
 
-        # 最后确保与输入完全同尺寸（避免边界尺寸误差）
         if y.shape[2:] != (H, W, D):
             y = F.interpolate(y, size=(H, W, D), mode='trilinear', align_corners=False)
 

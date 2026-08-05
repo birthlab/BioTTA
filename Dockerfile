@@ -1,37 +1,33 @@
-# BioTTA Docker镜像
-# 使用PyTorch官方基础镜像，支持CUDA
-FROM pytorch/pytorch:1.13.1-cuda11.6-cudnn8-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
-# 设置工作目录
+ARG APP_UID=1000
+ARG APP_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_ROOT_USER_ACTION=ignore \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    HOME=/home/biotta \
+    MPLCONFIGDIR=/home/biotta/.cache/matplotlib
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${APP_GID}" biotta \
+    && useradd --create-home --uid "${APP_UID}" --gid "${APP_GID}" --shell /bin/bash biotta
+
 WORKDIR /app
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    git \
-    curl \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r /app/requirements.txt
 
-# 安装ANTs (Advanced Normalization Tools)
-# ANTspy需要从源码编译，但为了简化可以使用预编译版本或跳过
-# 如果ANTs不可用，可以注释掉相关的图像配准功能
-RUN pip install --no-cache-dir \
-    antspyx \
-    || echo "Warning: ANTspy installation failed, template registration may not work"
+COPY --chown=biotta:${APP_GID} . /app
 
-# 复制依赖文件
-COPY requirements.txt .
+RUN mkdir -p /data/input /data/output "${MPLCONFIGDIR}" \
+    && chown -R biotta:${APP_GID} /data /home/biotta /app
 
-# 安装Python依赖
-RUN pip install --no-cache-dir -r requirements.txt
+USER biotta
 
-# 复制项目文件
-COPY . .
-
-# 设置Python路径
-ENV PYTHONPATH=/app:$PYTHONPATH
-
-# 默认命令
 CMD ["python", "main.py", "--help"]
-
