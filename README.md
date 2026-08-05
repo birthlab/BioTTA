@@ -4,29 +4,21 @@
 
 BioTTA is a source-free, unsupervised Test-Time Adaptation (TTA) framework designed for robust automatic fetal brain biometry.
 
-
-
 Deep learning models often suffer from performance degradation when deployed in unseen clinical environments due to domain shifts caused by multi-center acquisition, different SRR methods and variable pathology. BioTTA addresses this challenge by adapting pre-trained models to out-of-distribution (OoD) target data during inference, without requiring manual annotations.
-
-
 
 The framework operates in two stages:
 
-
-
 **Pre-training**: A unified encoder-decoder architecture is trained, where a shared encoder feeds into two parallel decoders for landmark heatmap prediction and direct biometric measurement regression respectively.
-
-
 
 **Test-Time Adaptation**: The model adapts to individual unlabeled test samples by minimizing entropy, length consistency, and boundary-gradient losses, while incorporating atlas-informed anatomical priors via registration .
 
-
-
 <img width="10000" height="9950" alt="github_fig1_press" src="https://github.com/user-attachments/assets/43841a9c-be0e-4211-9f4f-9d2ccfe0aefd" />
 
+We constructed normative growth trajectories for all 11 fetal brain biometrics across 22–39 gestational weeks using radiologist-annotated data from normal fetuses in the source domain cohort, following the parametric method of Royston and Wright. These population-specific reference curves (with 5th, 50th, and 95th centiles) enable GA-specific centile mapping of BioTTA-derived measurements, supporting automated risk stratification for neurodevelopmental anomalies including germinal matrix–intraventricular hemorrhage, ventriculomegaly, and cerebellar abnormality.
 
+<img width="7213" height="8361" alt="image" src="https://github.com/user-attachments/assets/45623fff-7d32-4983-b156-ff553c28c068" />
 
-To facilitate clinical translation, we further developed an automated web-based reporting system built upon the BioTTA framework. This end-to-end tool allows clinicians to upload 3D fetal MRI volumes (DICOM/NIfTI) and gestational age, automatically executing the full pipeline from preprocessing to biometry. The system generates an interactive HTML dashboard featuring a 3D viewer for slice navigation and quantitative analysis, where predicted measurements are dynamically mapped to standard growth trajectories to assist in risk stratification for developmental anomalies. Reports can be exported as standardized PDFs for clinical archiving, streamlining the diagnostic workflow and providing objective, consistent quantitative evidence for multi-center research.
+To facilitate clinical translation, we further developed an automated web-based reporting system built upon the BioTTA framework. This end-to-end tool allows clinicians to upload 3D fetal MRI volumes in NIfTI format and gestational age, automatically executing the full pipeline from preprocessing to biometry. The system generates an interactive HTML dashboard featuring a 3D viewer for slice navigation and quantitative analysis, where predicted measurements are dynamically mapped to standard growth trajectories to assist in risk stratification for developmental anomalies. Reports can be exported as standardized PDFs for clinical archiving, streamlining the diagnostic workflow and providing objective, consistent quantitative evidence for multi-center research.
 
 
 https://github.com/user-attachments/assets/45149929-4a3d-4dd5-9603-55c181f74d51
