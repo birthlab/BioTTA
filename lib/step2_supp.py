@@ -135,13 +135,9 @@ class TestDataset(torch.utils.data.Dataset):
         image_data = self.target_image[idx]
         X_T1  = image_data.copy()
         mask = X_T1 > 0
-        if not np.any(mask):
-            raise ValueError(f"The input image has no positive-valued foreground: {self.target_image_path}")
         X_T1_brain = X_T1[mask]
         mean = np.mean(X_T1_brain)
         std = np.std(X_T1_brain)
-        if std == 0:
-            std = 1.0
         normalized_brain = (X_T1_brain - mean) / std
         X_T1[mask] = normalized_brain
         X_T1[~mask] = 0

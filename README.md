@@ -1,54 +1,65 @@
-# BioTTA: Fetal Biometry and Landmark Localization
+# BioTTA: Fetal Biometry and Landmark Localization Tool
 
-BioTTA is a source-free, unsupervised test-time adaptation framework for robust automatic fetal brain biometry. It adapts pretrained models to out-of-distribution fetal MRI volumes without source data or target annotations.
+## Overview
 
-The pipeline has two stages:
+BioTTA is a source-free, unsupervised Test-Time Adaptation (TTA) framework designed for robust automatic fetal brain biometry.
 
-1. A shared encoder with regression and heatmap decoders predicts 11 biometric measurements and 22 landmarks.
-2. Test-time adaptation minimizes entropy, length-consistency, and boundary-gradient losses. When gestational age and atlas templates are available, registration supplies an additional anatomical prior.
+Deep learning models often suffer from performance degradation when deployed in unseen clinical environments due to domain shifts caused by multi-center acquisition, different SRR methods and variable pathology. BioTTA addresses this challenge by adapting pre-trained models to out-of-distribution (OoD) target data during inference, without requiring manual annotations.
+
+The framework operates in two stages:
+
+**Pre-training**: A unified encoder-decoder architecture is trained, where a shared encoder feeds into two parallel decoders for landmark heatmap prediction and direct biometric measurement regression respectively.
+
+**Test-Time Adaptation**: The model adapts to individual unlabeled test samples by minimizing entropy, length consistency, and boundary-gradient losses, while incorporating atlas-informed anatomical priors via registration .
 
 ![BioTTA architecture and workflow](src/github_fig1_press.jpg)
 
-Normative growth trajectories map the 11 predicted measurements to gestational-age-specific centiles. The included curves cover the reference range used by this release, while bundled atlas image and label pairs are available for 23-38 weeks.
+We constructed normative growth trajectories for all 11 fetal brain biometrics across 22–39 gestational weeks using radiologist-annotated data from normal fetuses in the source domain cohort, following the parametric method of Royston and Wright. These population-specific reference curves (with 5th, 50th, and 95th centiles) enable GA-specific centile mapping of BioTTA-derived measurements, supporting automated risk stratification for neurodevelopmental anomalies including germinal matrix–intraventricular hemorrhage, ventriculomegaly, and cerebellar abnormality.
 
 ![Fetal brain biometry growth trajectories](src/github_fig2.jpg)
 
-The accompanying reporting workflow can display the predicted measurements, landmarks, centiles, and slice-level visualizations.
+To facilitate clinical translation, we further developed an automated web-based reporting system built upon the BioTTA framework. This end-to-end tool allows clinicians to upload 3D fetal MRI volumes in NIfTI format and gestational age, automatically executing the full pipeline from preprocessing to biometry. The system generates an interactive HTML dashboard featuring a 3D viewer for slice navigation and quantitative analysis, where predicted measurements are dynamically mapped to standard growth trajectories to assist in risk stratification for developmental anomalies. Reports can be exported as standardized PDFs for clinical archiving, streamlining the diagnostic workflow and providing objective, consistent quantitative evidence for multi-center research.
 
 [Watch the BioTTA reporting demo](src/demo_video.mp4)
 
-## Features
 
-- Predicts 11 standard fetal brain biometric measurements and 22 landmark coordinates.
-- Adapts at inference time without source data or target labels.
-- Supports single-file and batch NIfTI input.
-- Uses optional gestational-age atlas registration.
-- Exports JSON results, landmark coordinates, visualizations, and centile plots.
-- Provides a GPU-enabled, non-root Docker image for reproducible execution.
+## Key Features
+
+1. **Precise & Consistent Biometry**: Delivers highly accurate quantification for 11 standard clinical fetal brain biometric measurements. Comparison experiments demonstrate the superior consistency and performance compared to baselines.
+
+2. **Robust Domain Generalization**: Mitigates domain shifts arising from diverse centers, scanner manufacturers, reconstruction methods (e.g., NiftyMIC, NeSVoR), and pathological conditions (e.g., GMH-IVH, VM, and cerebellar abnormalities).
+
+3. **Source-Free & Unsupervised**: Performs adaptation on the target domain without accessing source data or requiring target ground-truth labels.
+
+4. **End-to-End Clinical Reporting System**: Provides a unified platform designed for streamlined data upload and AI-driven biometry, directly assisting radiologists in clinical reading and diagnosis.
+
 
 ## Installation
 
-### Existing A40 environment
-
-The dependency set is based on the validated `lyj_clone` environment on the A40 server. The code is validated with PyTorch 2.5.1 in `lyj_clone` and PyTorch 2.6.0 in Docker. Clean installations use NumPy 1.26.4 to satisfy NiBabel's declared dependency while remaining below NumPy 2:
+### Option 1: Install via pip
 
 ```bash
-conda activate lyj_clone
-python main.py --help
+pip install -r requirements.txt
 ```
 
-### Python environment
-
-Python 3.10 is recommended.
+Or install manually:
 
 ```bash
-python -m pip install -r requirements.txt
-python main.py --help
+pip install torch torchvision
+pip install nibabel
+pip install pandas numpy
+pip install natsort
+pip install pyyaml
+pip install matplotlib
+pip install antspyx  # For image registration
+pip install timm     # For model architecture
 ```
 
-### Docker
+### Option 2: Docker (Recommended)
 
-Build the image with the host user's UID and GID so files written to bind mounts are not owned by root:
+Using Docker ensures environment consistency and reproducibility. GPU execution requires an NVIDIA GPU, a compatible NVIDIA driver, Docker, and the NVIDIA Container Toolkit.
+
+Build the image with the host user's UID and GID so output files are not owned by root:
 
 ```bash
 docker build \
@@ -57,91 +68,109 @@ docker build \
   -t biotta:latest .
 ```
 
-See [DOCKER.md](DOCKER.md) for GPU and volume examples.
+Run BioTTA by mounting the input directory as read-only and a writable output directory:
+
+```bash
+mkdir -p results
+
+docker run --rm --gpus all \
+  -v /path/to/input:/data/input:ro \
+  -v "$(pwd)/results:/data/output" \
+  biotta:latest \
+  python main.py \
+    --input /data/input/image.nii.gz \
+    --age 31 \
+    --registered_folder /data/output/registered \
+    --output /data/output \
+    --gpu 0
+```
+
+The image includes the pretrained models and atlas templates. Results are saved in the mounted `results` directory. See [DOCKER.md](DOCKER.md) for batch processing, GPU selection, custom configurations, and troubleshooting.
+
 
 ## Directory Structure
 
-```text
+```
 BioTTA/
-|-- main.py
-|-- config.yaml
-|-- requirements.txt
-|-- Dockerfile
-|-- DOCKER.md
-|-- biotta_step1.py
-|-- biotta_step2.py
-|-- biotta_output.py
-|-- lib/
-|   |-- step1_length_prediction.py
-|   |-- step2_source_network.py
-|   `-- step2_supp.py
-|-- models/
-|   |-- step1_length_MinValLoss.pth
-|   `-- step2_biometry_MinValLoss.pth
-|-- templates/
-|   |-- template_image/
-|   `-- template_label/
-|-- development_curves/
-`-- src/
-    |-- github_fig1_press.jpg
-    |-- github_fig2.jpg
-    `-- demo_video.mp4
+├── main.py                  # Main execution script
+├── config.yaml              # Configuration file
+├── requirements.txt         # Python dependencies list
+├── Dockerfile              # Docker image build file
+├── .dockerignore           # Docker ignore file
+├── DOCKER.md               # Docker usage documentation
+├── biotta_step1.py         # Step1 module
+├── biotta_step2.py         # Step2 module
+├── biotta_output.py        # Output module
+├── lib/                    # Dependency library
+│   ├── step1_length_prediction.py
+│   ├── step2_source_network.py
+│   └── step2_supp.py
+├── models/                 # Model files (to be prepared by user)
+│   ├── step1_length_MinValLoss.pth
+│   └── step2_biometry_MinValLoss.pth
+├── templates/              # Template files (to be prepared by user)
+│   ├── template_image/
+│   └── template_label/
+└── results/                # Output results
+    ├── step1_lengths.csv   # Step1 results (if enabled)
+    ├── results.json        # Final JSON results
+    └── {image_name}/       # Intermediate results for each sample
+        ├── landmarks.txt   # Endpoint coordinates text (if enabled)
+        ├── landmarks.png   # Visualization image (if enabled)
+        ├── length_centile_web.png # Length percentile chart web version (if enabled)
+        ├── length_centile.csv # Length percentile table (if enabled)
+        ├── length_centile.png # Length percentile chart PDF version (if enabled)
+        └── tent_TTA.pth    # TTA model (if enabled)
 ```
 
-## Configuration
 
-Paths in `config.yaml` are resolved relative to the configuration file, not the current working directory. Command-line paths are resolved normally by the shell.
+
+## Usage
+
+### 1. Configuration
+
+First, configure `config.yaml` according to your environment:
 
 ```yaml
 paths:
-  input_data: ""
+  input_data: ""  # Specify with --input when left empty
   output_dir: "./results"
   step1_model: "./models/step1_length_MinValLoss.pth"
   step2_model: "./models/step2_biometry_MinValLoss.pth"
   template:
     image_folder: "./templates/template_image"
     label_folder: "./templates/template_label"
-    registered_folder: "./templates_registered"
 ```
 
-Set `system.gpu_id` to `null` to use the CUDA devices exposed by the host or container. Use `--gpu` to select a specific visible device.
+### 2. Running Analysis
 
-## Usage
-
-Process one NIfTI file:
+Processing a Single File:
 
 ```bash
-python main.py \
-  --input path/to/sample.nii.gz \
-  --age 31 \
-  --registered_folder ./templates_registered \
-  --output ./results
+python main.py --input ./input/sample.nii.gz --age 31 --registered_folder ./templates_registered/sample --output ./test_results
 ```
 
-Process a folder using a gestational-age CSV file:
+Processing a Folder:
 
 ```bash
-python main.py \
-  --input path/to/nifti_folder \
-  --age_csv path/to/ages.csv \
-  --age_file_format '{"name_column": "name", "age_column": "age"}' \
-  --registered_folder ./templates_registered \
-  --output ./results
+python main.py --input ./input/batch --age_csv ./input/ages.csv --age_file_format '{"name_column": "name", "age_column": "age"}' --registered_folder ./templates_registered/batch --output ./test_results/batch
 ```
 
-Use a custom configuration file:
+Using a Custom Config:
 
 ```bash
-python main.py --config path/to/config.yaml --input path/to/sample.nii.gz
+python main.py --input path/to/sample.nii.gz --config my_config.yaml
 ```
 
-The input may also be defined by `paths.input_data` in the configuration file:
+Setting GPU:
 
 ```bash
-python main.py --config path/to/config.yaml
+python main.py --input path/to/sample.nii.gz --gpu 0
 ```
 
-### Gestational-age CSV
+### 3. Age File Format (Optional)
+
+To use Atlas constraints, you can provide an age file (CSV format):
 
 ```csv
 name,age
@@ -149,15 +178,19 @@ sample1,23.5
 sample2,24.0
 ```
 
-Age selection follows this priority:
+**Age Priority Logic:**
 
-1. `--age` for a single input file.
-2. The CSV or TSV file supplied with `--age_csv` or `data.age_file`.
-3. No atlas prior when age is unavailable.
+1. Command Line Argument: `--age` (Single file only) - Highest priority.
 
-## Output
+2. Age CSV File: Matches the image name to the age column.
 
-The main output is `results.json`:
+3. Default: If neither is provided, atlas constraints are disabled (TTA only).
+
+## Output Format
+
+### JSON Output
+
+The system outputs a structured JSON file (`results.json`):
 
 ```json
 [
@@ -167,26 +200,31 @@ The main output is `results.json`:
     "lengths": {
       "RLV_A": 12.5,
       "LLV_A": 12.3,
-      "RLV_C": 8.2
+      "RLV_C": 8.2,
+      ...
     },
     "landmarks": [
-      [12.0, 34.0, 56.0],
-      [18.0, 35.0, 57.0]
+      [x1, y1, z1],
+      [x2, y2, z2],
+      ...
     ]
   }
 ]
 ```
 
-Depending on `system.save_intermediate`, each image output directory can also contain:
+Entry structure:
 
-- `tent_TTA.pth`
-- `landmarks.txt`
-- `landmarks_original.txt`
-- `landmarks.png`
-- `length_centile.csv`
-- `length_centile.png`
-- `length_centile_web.png`
+- `image_name`: String.
+- `age`: Float (if provided).
+- `lengths`: Dictionary containing 11 biometric measurements (RLV_A, LLV_A, RLV_C, LLV_C, BBD, CBD, TCD, FOD, AVD, VH, CCL).
+- `landmarks`: List of 22 3D coordinates `[x, y, z]`.
 
-## Model Safety
+### Intermediate Results
 
-Only load model checkpoints from trusted sources. PyTorch checkpoints can contain serialized data and should be treated as executable artifacts when loaded with compatibility fallbacks.
+Based on the `save_intermediate` settings in the config, the following can be saved:
+
+- `step1_results`: Step 1 length prediction CSV.
+- `{image_name}/heatmaps`: Heatmaps after TTA training.
+- `{image_name}/tent_TTA.pth`: The adapted TTA model per sample.
+- `{image_name}/landmarks.txt`: Raw landmark coordinates (text format).
+- `{image_name}/landmarks.png`: Visualized result image.

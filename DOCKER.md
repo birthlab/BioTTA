@@ -1,6 +1,6 @@
 # BioTTA Docker Guide
 
-The Docker image uses PyTorch 2.6.0 with CUDA 12.4 and runs as a non-root user. The scientific dependency versions match the `lyj_clone` environment validated on the A40 server; the application code is also validated with PyTorch 2.5.1 in that environment.
+The Docker image uses PyTorch 2.6.0 with CUDA 12.4 and runs as a non-root user.
 
 ## Prerequisites
 

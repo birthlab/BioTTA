@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -175,7 +174,7 @@ def process_single_image(
     template_config = config["paths"].get("template", {})
     image_folder = template_config.get("image_folder", "")
     label_folder = template_config.get("label_folder", "")
-    if Path(image_folder).is_dir() and Path(label_folder).is_dir():
+    if Path(image_folder).is_dir():
         template_paths = {
             "image_folder": image_folder,
             "label_folder": label_folder,
@@ -262,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Configuration file (default: {DEFAULT_CONFIG})",
     )
     parser.add_argument("--gpu", help="Visible GPU index")
-    parser.add_argument("--age", type=float, help="Gestational age for one input file")
+    parser.add_argument("--age", type=int, help="Gestational age for one input file")
     parser.add_argument("--age_csv", help="CSV or TSV gestational-age table for batch input")
     parser.add_argument(
         "--age_file_format",
@@ -311,12 +310,6 @@ def main() -> None:
     gpu_id = args.gpu if args.gpu is not None else config["system"].get("gpu_id")
     if gpu_id is not None and str(gpu_id) != "":
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    seed = int(config["system"].get("seed", 1))
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

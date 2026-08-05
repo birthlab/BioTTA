@@ -38,8 +38,6 @@ def run_tta_and_predict(
 ) -> Tuple[np.ndarray, Dict]:
     """Run TTA for one image and return 22 landmark coordinates plus metadata."""
     batch_size = config.get('batch_size', 1)
-    if batch_size != 1:
-        raise ValueError("Step 2 processes one image at a time and requires batch_size=1.")
     channel = config.get('channel', 22)
     init_temp = config.get('init_temp', 0.5)
     topk = config.get('topk', 50)
@@ -72,10 +70,10 @@ def run_tta_and_predict(
     target_loader = DataLoader(
         dataset_target, 
         batch_size=batch_size, 
-        shuffle=False,
+        shuffle=True,
         num_workers=0,
-        drop_last=False,
-        pin_memory=device.type == 'cuda'
+        drop_last=True,
+        pin_memory=True
     )
     
     net = LocalAppearance(1, channel).to(device)
@@ -102,6 +100,7 @@ def run_tta_and_predict(
             min_grad=0.4
         )
         
+        torch.manual_seed(1)
         optim = torch.optim.Adam(
             list(tent_net.parameters()) + list(length_loss_f.parameters()),
             lr=learning_rate
@@ -143,15 +142,10 @@ def run_tta_and_predict(
                 if i == 0:
                     print(f'Epoch [{epoch+1}/{num_epoch}], Loss: {loss.item():.4f}')
             
-            if not epoch_losses:
-                raise RuntimeError("Step 2 produced no training batches.")
-            avg_loss = float(np.mean(epoch_losses))
+            avg_loss = np.mean(epoch_losses)
             if avg_loss < min_loss:
                 min_loss = avg_loss
-                best_model_state = {
-                    key: value.detach().clone() for key, value in tent_net.state_dict().items()
-                }
-            scheduler.step()
+                best_model_state = tent_net.state_dict().copy()
         
         if best_model_state is not None:
             tent_net.load_state_dict(best_model_state)
@@ -187,45 +181,43 @@ def run_tta_and_predict(
         raise RuntimeError("Step 2 produced no inference batches.")
     
     data = nb.load(image_path).get_fdata()
-    mask = data > 0
-    if not np.any(mask):
-        raise ValueError(f"The input image has no positive-valued foreground: {image_path}")
+    data_copy = data.copy()
+    data_expand = np.expand_dims(data_copy, -1)
+    mask = data_expand > 0
     ind_brain = block_ind(mask)
     sized_data = extract_brain(data, ind_brain, [128, 160, 128])
     sized_mask = sized_data > 0
+    img_affine = nb.load(image_path).affine
     max_value = np.max(sized_data)
     min_value = np.min(sized_data)
     
     cropped_template_heatmap_data = None
     if template_paths and age is not None:
-        atlas_age = int(round(age))
-        template_image_path = Path(template_paths['image_folder']) / f'STA{atlas_age}.nii.gz'
-        template_label_path = Path(template_paths['label_folder']) / f'{atlas_age}_m.nii.gz'
-        if template_image_path.is_file() and template_label_path.is_file():
-            fallback_folder = Path(output_dir or '.') / 'registered_templates'
-            registered_folder = Path(template_paths.get('registered_folder') or fallback_folder)
-            registered_folder.mkdir(parents=True, exist_ok=True)
-            registered_template_path = (
-                registered_folder / f'{image_name}_registered_{atlas_age}_m.nii.gz'
-            )
-            if not registered_template_path.is_file():
-                register_template_label(
-                    str(template_image_path),
-                    str(template_label_path),
-                    image_path,
-                    str(registered_template_path),
-                )
-                print(f"[OK] Atlas registration completed for week {atlas_age}")
-            else:
-                print(f"[OK] Reusing registered atlas label: {registered_template_path}")
+        age = round(age)
+        if age > 22:
+            template_image_path = os.path.join(template_paths['image_folder'], f'STA{age}.nii.gz')
+            template_label_path = os.path.join(template_paths['label_folder'], f'{age}_m.nii.gz')
+            registered_folder = template_paths.get('registered_folder', None)
 
-            registered_template_label = nb.load(registered_template_path).get_fdata()
-            cropped_template_heatmap_data = crop_template_label(registered_template_label, data)
-        else:
-            print(
-                f"[WARNING] Atlas templates are unavailable for week {atlas_age}; "
-                "continuing without the atlas constraint."
-            )
+            if registered_folder:
+                os.makedirs(registered_folder, exist_ok=True)
+                registered_template_path = os.path.join(
+                    registered_folder,
+                    f'{image_name}_registered_{age}_m.nii.gz'
+                )
+                if not os.path.exists(registered_template_path):
+                    register_template_label(
+                        template_image_path,
+                        template_label_path,
+                        image_path,
+                        registered_template_path
+                    )
+                    print(f"[OK] Atlas registration completed for week {age}")
+                else:
+                    print(f"[OK] Reusing registered atlas label: {registered_template_path}")
+
+                registered_template_label = nb.load(registered_template_path).get_fdata()
+                cropped_template_heatmap_data = crop_template_label(registered_template_label, data)
     
     coordinates = []
     if cropped_template_heatmap_data is not None:
@@ -573,12 +565,11 @@ def save_landmarks_visualization(
         if len(non_zero_indices[0]) > 0 and len(non_zero_indices[1]) > 0:
             leftmost = np.min(non_zero_indices[1])
             rightmost = np.max(non_zero_indices[1])
-            cropped_width = rightmost - leftmost + 1
-            new_width = cropped_width + 20
+            new_width = rightmost - leftmost + 20
             h, w = img_ups.shape[:2]
             new_img = np.zeros((h, new_width, 3), dtype=img_ups.dtype)
             paste_left = 10
-            new_img[:, paste_left:paste_left + cropped_width] = img_ups[:, leftmost:rightmost + 1]
+            new_img[:, paste_left:paste_left + (rightmost - leftmost)] = img_ups[:, leftmost:rightmost]
             img_ups = new_img
             cross_positions = [(x, y-leftmost+paste_left) for (x, y) in cross_positions]
         
@@ -597,9 +588,7 @@ def save_landmarks_visualization(
         img_ups = images_ups[i]
         cross_positions = cross_positions_list[i]
         if np.max(img_ups) > 1 or np.min(img_ups) < 0:
-            value_range = np.max(img_ups) - np.min(img_ups)
-            if value_range > 0:
-                img_ups = (img_ups - np.min(img_ups)) / value_range
+            img_ups = (img_ups - np.min(img_ups)) / (np.max(img_ups) - np.min(img_ups))
         img_ups = img_ups.astype(np.float32)
         ax = fig.add_subplot(gs[i])
         ax.imshow(img_ups, aspect='auto')
